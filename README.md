@@ -3,15 +3,15 @@
 [![build](https://github.com/hafaio/polars-map/actions/workflows/build.yml/badge.svg)](https://github.com/hafaio/polars-map/actions/workflows/build.yml)
 [![pypi](https://img.shields.io/pypi/v/polars-map)](https://pypi.org/project/polars-map/)
 
-Polars plugin providing a Map extension type and functions.
-Maps represent a mapping from unique keys of any type to values, and are stored as `List(Struct({key, value}))` columns.
-Most functions in the `.map` namespace accept either the `Map` extension type or the
-underlying `List(Struct)`. The type-preserving methods (`filter`, `filter_keys`,
-`filter_values`, `merge`, `intersection`, `difference`) don't remap the key or value
-types, so they reuse the input's dtype instead of re-inferring it (which would lock the
-GIL). On the expression API that reuse requires the `Map` extension as input; cast a plain
-`List(Struct)` first if needed, e.g. with `.map.from_entries()`. The equivalent `Series`
-methods accept either.
+Polars plugin providing a `Map` extension type stored as `List(Struct({key, value}))`.
+
+> Polars 2.0 ships a native `pl.Map` and reserves the `.map` namespace, so this package is
+> pinned to `polars<2`. Its semantics match the native type; see
+> [Migrating to native `pl.Map`](#migrating-to-native-plmap).
+
+The type-preserving methods (`filter`, `filter_keys`, `filter_values`, `merge`,
+`intersection`, `difference`) require a `Map` input so they can keep its dtype instead of
+inferring it; the accessors also accept the raw `List(Struct)`.
 
 ## Installation
 
@@ -47,7 +47,6 @@ import polars as pl
 import pyarrow as pa
 from polars_map import Map, from_arrow, to_arrow, scan_arrow
 
-# Construction
 ser = pl.Series(
     "m",
     [
@@ -58,25 +57,25 @@ ser = pl.Series(
 )
 df = pl.DataFrame([ser])
 
-# Accessors
+# accessors
 df.select(pl.col("m").map.keys())  # [["a", "b"], ["x"]]
 df.select(pl.col("m").map.values())  # [[1, 2], [10]]
 df.select(pl.col("m").map.len())  # [2, 1]
 
-# Lookup
+# lookup
 df.select(pl.col("m").map.get("a"))  # [1, None]
 df.select(pl.col("m").map.contains_key("a"))  # [True, False]
 
-# Filtering
+# filtering
 df.select(pl.col("m").map.filter(pl.element().struct["value"] > 1))
 df.select(pl.col("m").map.filter_keys(pl.element() > "a"))
 df.select(pl.col("m").map.filter_values(pl.element() >= 2))
 
-# Transform keys or values
+# transform keys or values
 df.select(pl.col("m").map.eval_keys(pl.element().str.to_uppercase()))
 df.select(pl.col("m").map.eval_values(pl.element() * 2))
 
-# Merge (right-side wins on key conflict)
+# merge: right value, left position
 left = pl.Series(
     "l",
     [[{"key": "a", "value": 1}, {"key": "b", "value": 2}]],
@@ -91,31 +90,31 @@ pair = pl.DataFrame([left, right])
 pair.select(pl.col("l").map.merge(pl.col("r")))
 # [{"a": 99, "b": 2, "c": 3}]
 
-# Set operations
+# set operations
 pair.select(pl.col("l").map.intersection(pl.col("r")))  # keys in both
 pair.select(pl.col("l").map.difference(pl.col("r")))  # keys only in left
 
-# Convert to/from plain List(Struct)
-df.select(pl.col("m").map.entries())  # strip Map -> List(Struct)
+# strip Map -> List(Struct)
+df.select(pl.col("m").map.entries())
 
-# from_entries is the inverse: it wraps a raw List(Struct) column into a Map
+# from_entries is the inverse
 entries = pl.Series(
     "e",
-    [[{"key": "a", "value": 1}, {"key": "a", "value": 2}]],
+    [[{"key": "a", "value": 1}, {"key": "b", "value": 2}, {"key": "a", "value": 3}]],
     dtype=pl.List(pl.Struct({"key": pl.String, "value": pl.Int64})),
 )
-pl.DataFrame([entries]).select(pl.col("e").map.from_entries())  # {"a": 1}
+pl.DataFrame([entries]).select(pl.col("e").map.from_entries())  # {"a": 3, "b": 2}
 
-# Series iteration yields Python dicts
+# Series iteration yields dicts
 for d in ser.map:
     print(d)  # {"a": 1, "b": 2}, {"x": 10}
 
-# Arrow table with map column → Polars DataFrame
+# arrow roundtrip
 table = pa.table({"m": pa.array([[("a", 1)]], type=pa.map_(pa.string(), pa.int64()))})
 df = from_arrow(table)  # Map(String, Int64) dtype preserved
-table2 = to_arrow(df)  # roundtrips back to arrow map<>
+table2 = to_arrow(df)
 
-# Lazy scanning from an Arrow source
+# lazy scanning from an arrow source
 lf = scan_arrow(lambda: [table])
 result = lf.collect()
 ```
@@ -126,3 +125,16 @@ result = lf.collect()
 - **`pl.dtype_of`** — used to efficiently cast to the extension type after _some_ operations is also unstable.
 - **GIL** - is required to automatically wrap an expression as the extension type, and so operations which could change the underlying key or value types will briefly lock the GIL to do the cast. This may also prevent the polars engine from reasoning about the type.
 - **Large offsets** — Arrow's `map<>` type uses only 32-bit offsets, so exporting a Polars map backed by a `LargeList` whose offsets don't fit in a `u32` will error. Arrow has no large-offset map type.
+
+## Migrating to native `pl.Map`
+
+`Map(pl.String(), pl.Int64())` becomes `pl.Map(pl.String, pl.Int64)`, `.map.from_entries()`
+becomes `.list.to_map()`, and the Arrow helpers become `pl.from_arrow` / `.to_arrow()`.
+
+The remaining methods have no native counterpart; write them as `.map.entries()`, a
+`list.eval`, and `.list.to_map()` when a map is rebuilt.
+
+```python
+m.map.entries().list.eval(pl.element().struct["key"])  # keys
+pl.concat_list(l.map.entries(), r.map.entries()).list.to_map()  # merge
+```

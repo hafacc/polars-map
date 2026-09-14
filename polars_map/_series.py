@@ -9,7 +9,7 @@ from typing import Any, overload
 
 import polars as pl
 
-from ._utils import dedup, expr_eval, tag, validate
+from ._utils import canonical, canonicalize, expr_eval, tag
 
 
 @pl.api.register_series_namespace("map")
@@ -19,28 +19,22 @@ class MapSeries:
 
     _series: pl.Series
 
-    def from_entries(
-        self,
-        *,
-        validate_fields: bool = True,
-        deduplicate: bool = True,
-        parallel: bool = False,
-    ) -> pl.Series:
+    def _as_self(self, ser: pl.Series) -> pl.Series:
+        """Wrap a List(Struct) result back as Map, preserving the original dtype."""
+        return ser.ext.to(self._series.dtype)
+
+    def from_entries(self, *, parallel: bool = False) -> pl.Series:
         """Wrap a List(Struct({key, value})) Series as a Map extension type.
+
+        Duplicate keys keep their first position and last value; null keys are
+        rejected.
 
         Parameters
         ----------
-        deduplicate
-            If True, deduplicate by key, keeping the first occurrence.
         parallel
             Run list evaluations in parallel.
         """
-        entries = self._series
-        if validate_fields:
-            entries = entries.list.eval(validate(pl.element()), parallel=parallel)
-        if deduplicate:
-            entries = entries.list.eval(dedup(), parallel=parallel)
-        return tag(entries)
+        return canonicalize(self._series, parallel=parallel)
 
     @functools.cached_property
     def _entries(self) -> pl.Series:
@@ -95,32 +89,18 @@ class MapSeries:
         """Check if a key exists in the map."""
         return self._entries.list.eval(pl.element().struct["key"] == key).list.any()
 
-    def eval(
-        self,
-        expr: pl.Expr,
-        *,
-        validate_fields: bool = True,
-        deduplicate: bool = True,
-        parallel: bool = False,
-    ) -> pl.Series:
+    def eval(self, expr: pl.Expr, *, parallel: bool = False) -> pl.Series:
         """Evaluate an expression on entries, returning a Map."""
-        inner = validate(expr) if validate_fields else expr
-        evaled = self._entries.list.eval(inner, parallel=parallel)
-        if deduplicate:
-            evaled = evaled.list.eval(dedup(), parallel=parallel)
-        return tag(evaled)
+        evaled = self._entries.list.eval(expr, parallel=parallel)
+        return canonicalize(evaled, parallel=parallel)
 
-    def eval_keys(
-        self, expr: pl.Expr, *, deduplicate: bool = True, parallel: bool = False
-    ) -> pl.Series:
+    def eval_keys(self, expr: pl.Expr, *, parallel: bool = False) -> pl.Series:
         """Transform keys, returning a Map with new key type."""
         inner: pl.Expr = pl.element().struct.with_fields(  # pyright: ignore[reportUnknownMemberType]
             key=expr_eval(pl.element().struct["key"], expr)
         )
         evaled = self._entries.list.eval(inner, parallel=parallel)
-        if deduplicate:
-            evaled = evaled.list.eval(dedup(), parallel=parallel)
-        return tag(evaled)
+        return canonicalize(evaled, parallel=parallel)
 
     def eval_values(self, expr: pl.Expr, *, parallel: bool = False) -> pl.Series:
         """Transform values, returning a Map with new value type."""
@@ -131,7 +111,7 @@ class MapSeries:
 
     def filter(self, predicate: pl.Expr, *, parallel: bool = False) -> pl.Series:
         """Filter entries by a predicate on the struct entry."""
-        return tag(
+        return self._as_self(
             self._entries.list.eval(pl.element().filter(predicate), parallel=parallel)
         )
 
@@ -140,11 +120,11 @@ class MapSeries:
         inner = pl.element().filter(
             expr_eval(pl.element().struct["key"], predicate)  # pyright: ignore[reportUnknownMemberType]
         )
-        return tag(self._entries.list.eval(inner, parallel=parallel))
+        return self._as_self(self._entries.list.eval(inner, parallel=parallel))
 
     def filter_values(self, predicate: pl.Expr, *, parallel: bool = False) -> pl.Series:
         """Filter entries where the value satisfies the predicate."""
-        return tag(
+        return self._as_self(
             self._entries.list.eval(
                 pl.element().filter(
                     expr_eval(pl.element().struct["value"], predicate)  # pyright: ignore[reportUnknownMemberType]
@@ -154,14 +134,12 @@ class MapSeries:
         )
 
     def merge(self, other: pl.Series, *, parallel: bool = False) -> pl.Series:
-        """Merge two maps. Right-side values win on key conflict."""
+        """Merge two maps.
+
+        On a key conflict the right-hand value wins, in the left-hand position.
+        """
         combined = self._entries.list.concat(other.map.entries())  # pyright: ignore[reportAttributeAccessIssue,reportUnknownMemberType,reportUnknownArgumentType]
-        return tag(
-            combined.list.eval(
-                pl.element().filter(pl.element().struct["key"].is_last_distinct()),
-                parallel=parallel,
-            )
-        )
+        return self._as_self(combined.list.eval(canonical(), parallel=parallel))
 
     def intersection(self, other: pl.Series, *, parallel: bool = False) -> pl.Series:
         """Keep entries from self where the key also exists in other."""
@@ -170,14 +148,14 @@ class MapSeries:
             pl.element().struct["key"].is_duplicated()
             & pl.element().struct["key"].is_first_distinct()
         )
-        return tag(combined.list.eval(inner, parallel=parallel))
+        return self._as_self(combined.list.eval(inner, parallel=parallel))
 
     def difference(self, other: pl.Series, *, parallel: bool = False) -> pl.Series:
         """Keep entries from self where the key does NOT exist in other."""
         other_entries: pl.Series = other.map.entries()  # pyright: ignore[reportAttributeAccessIssue,reportUnknownMemberType,reportUnknownVariableType]
         combined = self._entries.list.concat(other_entries).list.concat(other_entries)  # pyright: ignore[reportUnknownArgumentType]
         inner = pl.element().filter(~pl.element().struct["key"].is_duplicated())
-        return tag(combined.list.eval(inner, parallel=parallel))
+        return self._as_self(combined.list.eval(inner, parallel=parallel))
 
     def __iter__(self) -> Iterator[dict[Any, Any] | None]:
         """Iterate over rows, yielding Python dicts."""

@@ -2,43 +2,64 @@
 
 from __future__ import annotations
 
+import functools
+
 import polars as pl
+from polars.exceptions import InvalidOperationError
 
 from ._dtype import Map
 
 
+def canonical() -> pl.Expr:
+    """Interior ``list.eval`` expr rebuilding entries into canonical form."""
+    key = pl.element().struct["key"]
+    value = pl.element().struct["value"]
+    return pl.struct(  # pyright: ignore[reportUnknownMemberType]
+        key,
+        value.last().over(key),  # pyright: ignore[reportUnknownMemberType]
+    ).filter(key.is_first_distinct())
+
+
 def tag(ser: pl.Series) -> pl.Series:
-    """Tag a List(Struct({key, value})) series as a Map extension type."""
-    [key, value] = ser.dtype.inner.fields  # type: ignore[union-attr]
-    return ser.ext.to(Map(key.dtype, value.dtype))  # type: ignore[arg-type]
+    """Relabel canonical entries as a Map extension type."""
+    [key, value] = ser.dtype.inner.fields  # pyright: ignore[reportAttributeAccessIssue,reportUnknownMemberType,reportUnknownVariableType]
+    return ser.ext.to(Map(key.dtype, value.dtype))  # pyright: ignore[reportUnknownMemberType,reportUnknownArgumentType]
+
+
+def canonicalize(ser: pl.Series, *, parallel: bool = False) -> pl.Series:
+    """Rebuild raw entries into canonical form and tag them as a Map.
+
+    Replicates ``list.to_map`` from Polars 2: exact ``key``/``value`` fields, no null
+    entries or keys, duplicate keys keep their first position and last value.
+    """
+    dtype = ser.dtype
+    if not (
+        isinstance(dtype, pl.List)
+        and isinstance(dtype.inner, pl.Struct)
+        and {field.name for field in dtype.inner.fields} == {"key", "value"}
+    ):
+        raise InvalidOperationError(
+            "Map entries must be a Struct with exactly two fields named "
+            "`key` and `value`"
+        )
+    elif ser.list.eval(pl.element().is_null()).list.any().any():
+        raise InvalidOperationError("Map entries cannot be null")
+    elif ser.list.eval(pl.element().struct["key"].is_null()).list.any().any():
+        raise InvalidOperationError("Map keys cannot be null")
+    else:
+        return tag(ser.list.eval(canonical(), parallel=parallel))
 
 
 def infer_map(expr: pl.Expr) -> pl.Expr:
-    """Wrap a List(Struct({key, value})) expr as Map, inferring the dtype at runtime."""
+    """Relabel a canonical entries expr as a Map, inferring the key and value types."""
     return expr.map_batches(tag, is_elementwise=True)
 
 
-def validate(expr: pl.Expr) -> pl.Expr:
-    """Rebuild each entry as a clean ``{key, value}`` struct, preserving null entries.
-
-    A null element stays null rather than becoming a non-null struct with null
-    key and value fields.
-    """
-    rebuilt = pl.struct(  # pyright: ignore[reportUnknownMemberType]
-        expr.struct["key"].alias("key"),
-        expr.struct["value"].alias("value"),
+def canonicalize_expr(expr: pl.Expr, *, parallel: bool = False) -> pl.Expr:
+    """Rebuild a raw entries expr into canonical form and tag it as a Map."""
+    return expr.map_batches(
+        functools.partial(canonicalize, parallel=parallel), is_elementwise=True
     )
-    # preserve nulls
-    return pl.when(expr.is_null()).then(None).otherwise(rebuilt)  # pyright: ignore[reportUnknownMemberType]
-
-
-def dedup() -> pl.Expr:
-    """Interior ``list.eval`` expr keeping the first entry for each distinct key.
-
-    Applied as a second pass over already-transformed entries so ``pl.element()``
-    refers to the transformed keys, not the pre-transform ones.
-    """
-    return pl.element().filter(pl.element().struct["key"].is_first_distinct())
 
 
 def expr_eval(expr: pl.Expr, evaled: pl.Expr) -> pl.Expr:

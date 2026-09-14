@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import polars as pl
 
-from ._utils import dedup, expr_eval, infer_map, validate
+from ._utils import canonical, canonicalize_expr, expr_eval, infer_map
 
 
 @pl.api.register_expr_namespace("map")
@@ -21,28 +21,18 @@ class MapExpr:
         """Wrap a List(Struct) result back as Map, preserving the original dtype."""
         return expr.ext.to(pl.dtype_of(self._expr))
 
-    def from_entries(
-        self,
-        *,
-        validate_fields: bool = True,
-        deduplicate: bool = True,
-        parallel: bool = False,
-    ) -> pl.Expr:
+    def from_entries(self, *, parallel: bool = False) -> pl.Expr:
         """Wrap a List(Struct({key, value})) expression as a Map extension type.
+
+        Duplicate keys keep their first position and last value; null keys are
+        rejected.
 
         Parameters
         ----------
-        deduplicate
-            If True, deduplicate by key, keeping the first occurrence.
         parallel
             Run list evaluations in parallel.
         """
-        entries = self._expr
-        if validate_fields:
-            entries = entries.list.eval(validate(pl.element()), parallel=parallel)
-        if deduplicate:
-            entries = entries.list.eval(dedup(), parallel=parallel)
-        return infer_map(entries)
+        return canonicalize_expr(self._expr, parallel=parallel)
 
     @functools.cached_property
     def _entries(self) -> pl.Expr:
@@ -94,34 +84,18 @@ class MapExpr:
         """Check if a key exists in the map."""
         return self._entries.list.eval(pl.element().struct["key"] == key).list.any()
 
-    def eval(
-        self,
-        expr: pl.Expr,
-        *,
-        validate_fields: bool = True,
-        deduplicate: bool = True,
-        parallel: bool = False,
-    ) -> pl.Expr:
+    def eval(self, expr: pl.Expr, *, parallel: bool = False) -> pl.Expr:
         """Evaluate an expression on entries, returning a Map.
-
-        The expression operates on the struct elements via ``pl.element()``.
 
         Example
         -------
         >>> col.map.eval(pl.element().struct.with_fields(pl.element().struct["value"] * 2))
         """
-        inner = validate(expr) if validate_fields else expr
-        evaled = self._entries.list.eval(inner, parallel=parallel)
-        if deduplicate:
-            evaled = evaled.list.eval(dedup(), parallel=parallel)
-        return infer_map(evaled)
+        evaled = self._entries.list.eval(expr, parallel=parallel)
+        return canonicalize_expr(evaled, parallel=parallel)
 
-    def eval_keys(
-        self, expr: pl.Expr, *, deduplicate: bool = True, parallel: bool = False
-    ) -> pl.Expr:
+    def eval_keys(self, expr: pl.Expr, *, parallel: bool = False) -> pl.Expr:
         """Transform keys, returning a Map with new key type.
-
-        The expression operates on each key via ``pl.element()``.
 
         Example
         -------
@@ -131,14 +105,10 @@ class MapExpr:
             key=expr_eval(pl.element().struct["key"], expr)
         )
         evaled = self._entries.list.eval(inner, parallel=parallel)
-        if deduplicate:
-            evaled = evaled.list.eval(dedup(), parallel=parallel)
-        return infer_map(evaled)
+        return canonicalize_expr(evaled, parallel=parallel)
 
     def eval_values(self, expr: pl.Expr, *, parallel: bool = False) -> pl.Expr:
         """Transform values, returning a Map with new value type.
-
-        The expression operates on each value via ``pl.element()``.
 
         Example
         -------
@@ -185,14 +155,12 @@ class MapExpr:
         return self._as_self(self._entries.list.eval(inner, parallel=parallel))
 
     def merge(self, other: pl.Expr, *, parallel: bool = False) -> pl.Expr:
-        """Merge two maps. Right-side values win on key conflict."""
+        """Merge two maps.
+
+        On a key conflict the right-hand value wins, in the left-hand position.
+        """
         combined = pl.concat_list([self._entries, other.map.entries()])  # pyright: ignore[reportUnknownMemberType,reportAttributeAccessIssue,reportUnknownVariableType]
-        return self._as_self(
-            combined.list.eval(
-                pl.element().filter(pl.element().struct["key"].is_last_distinct()),
-                parallel=parallel,
-            )
-        )
+        return self._as_self(combined.list.eval(canonical(), parallel=parallel))
 
     def intersection(self, other: pl.Expr, *, parallel: bool = False) -> pl.Expr:
         """Keep entries from self where the key also exists in other."""
