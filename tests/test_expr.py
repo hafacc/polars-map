@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import polars as pl
+import pytest
+from polars.exceptions import InvalidOperationError
 
 from polars_map import Map
 
 from .conftest import emap
+
+_ENTRIES = pl.List(pl.Struct({"key": pl.String, "value": pl.Int64}))
 
 
 def test_keys(map_frame: pl.DataFrame) -> None:
@@ -131,24 +135,39 @@ def test_from_entries() -> None:
 
 
 def test_eval_keys_dedup_collapsing() -> None:
-    """Verify eval_keys deduplicates on the transformed key, keeping the first."""
+    """Verify eval_keys collapses colliding keys to first position, last value."""
     ser = pl.Series(
         "map",
-        [[{"key": "a", "value": 1}, {"key": "A", "value": 2}]],
+        [
+            [
+                {"key": "a", "value": 1},
+                {"key": "b", "value": 2},
+                {"key": "A", "value": 3},
+            ]
+        ],
         dtype=Map(pl.String(), pl.Int64()),
     )
     frame = pl.DataFrame([ser])
     [result] = frame.select(  # pyright: ignore[reportUnknownMemberType]
         emap(pl.col("map")).eval_keys(pl.element().str.to_uppercase())
     )
-    assert result.ext.storage().to_list()[0] == [{"key": "A", "value": 1}]
+    assert result.ext.storage().to_list()[0] == [
+        {"key": "A", "value": 3},
+        {"key": "B", "value": 2},
+    ]
 
 
 def test_eval_dedup_collapsing_keys() -> None:
-    """Verify eval deduplicates on the transformed key, keeping the first."""
+    """Verify eval collapses colliding keys to first position, last value."""
     ser = pl.Series(
         "map",
-        [[{"key": "a", "value": 1}, {"key": "A", "value": 2}]],
+        [
+            [
+                {"key": "a", "value": 1},
+                {"key": "b", "value": 2},
+                {"key": "A", "value": 3},
+            ]
+        ],
         dtype=Map(pl.String(), pl.Int64()),
     )
     frame = pl.DataFrame([ser])
@@ -159,46 +178,103 @@ def test_eval_dedup_collapsing_keys() -> None:
             )
         )
     )
-    assert result.ext.storage().to_list()[0] == [{"key": "A", "value": 1}]
+    assert result.ext.storage().to_list()[0] == [
+        {"key": "A", "value": 3},
+        {"key": "B", "value": 2},
+    ]
 
 
-def test_from_entries_validate_fields_preserves_null() -> None:
-    """Verify validate_fields keeps null entries null instead of fabricating fields."""
+def test_from_entries_dedup_first_position_last_value() -> None:
+    """Verify a repeated key keeps its first position and its last value."""
     ser = pl.Series(
         "map",
-        [[{"key": "a", "value": 1}, None]],
-        dtype=pl.List(pl.Struct({"key": pl.String, "value": pl.Int64})),
+        [
+            [
+                {"key": "a", "value": 1},
+                {"key": "b", "value": 2},
+                {"key": "a", "value": 3},
+            ]
+        ],
+        dtype=_ENTRIES,
     )
     frame = pl.DataFrame([ser])
     [result] = frame.select(emap(pl.col("map")).from_entries())  # pyright: ignore[reportUnknownMemberType]
-    assert result.ext.storage().to_list()[0] == [{"key": "a", "value": 1}, None]
+    assert result.ext.storage().to_list()[0] == [
+        {"key": "a", "value": 3},
+        {"key": "b", "value": 2},
+    ]
 
 
-def test_from_entries_deduplicates_by_default() -> None:
-    """Verify from_entries deduplicates keys, keeping first."""
+def test_from_entries_reversed_fields() -> None:
+    """Verify entries ordered value, key are accepted and canonicalized."""
     ser = pl.Series(
         "map",
-        [[{"key": "a", "value": 1}, {"key": "a", "value": 99}]],
-        dtype=pl.List(pl.Struct({"key": pl.String, "value": pl.Int64})),
+        [[{"value": 1, "key": "a"}]],
+        dtype=pl.List(pl.Struct({"value": pl.Int64, "key": pl.String})),
     )
     frame = pl.DataFrame([ser])
     [result] = frame.select(emap(pl.col("map")).from_entries())  # pyright: ignore[reportUnknownMemberType]
-    vals = result.ext.storage().to_list()[0]
-    assert len(vals) == 1
-    assert vals[0]["value"] == 1
+    assert result.dtype == Map(pl.String(), pl.Int64())
+    assert result.ext.storage().to_list()[0] == [{"key": "a", "value": 1}]
 
 
-def test_from_entries_no_deduplicate() -> None:
-    """Verify from_entries keeps duplicates when disabled."""
-    ser = pl.Series(
-        "map",
-        [[{"key": "a", "value": 1}, {"key": "a", "value": 99}]],
-        dtype=pl.List(pl.Struct({"key": pl.String, "value": pl.Int64})),
-    )
+def test_from_entries_null_key() -> None:
+    """Verify a null key in a live row is rejected."""
+    ser = pl.Series("map", [[{"key": None, "value": 1}]], dtype=_ENTRIES)
     frame = pl.DataFrame([ser])
-    [result] = frame.select(emap(pl.col("map")).from_entries(deduplicate=False))  # pyright: ignore[reportUnknownMemberType]
-    vals = result.ext.storage().to_list()[0]
-    assert len(vals) == 2  # noqa: PLR2004
+    with pytest.raises(InvalidOperationError, match="Map keys cannot be null"):
+        frame.select(emap(pl.col("map")).from_entries())  # pyright: ignore[reportUnknownMemberType]
+
+
+def test_from_entries_null_entry() -> None:
+    """Verify a null entry in a live row is rejected."""
+    ser = pl.Series("map", [[{"key": "a", "value": 1}, None]], dtype=_ENTRIES)
+    frame = pl.DataFrame([ser])
+    with pytest.raises(InvalidOperationError, match="Map entries cannot be null"):
+        frame.select(emap(pl.col("map")).from_entries())  # pyright: ignore[reportUnknownMemberType]
+
+
+@pytest.mark.parametrize(
+    "ser",
+    [
+        pl.Series("map", [[{"k": "a", "v": 1}]]),
+        pl.Series("map", [[{"key": "a", "value": 1, "extra": True}]]),
+        pl.Series("map", [[{"key": "a"}]]),
+        pl.Series("map", [[1, 2]]),
+    ],
+    ids=["wrong_names", "extra_field", "missing_field", "not_a_struct"],
+)
+def test_from_entries_bad_entry_shape(ser: pl.Series) -> None:
+    """Verify entries that aren't exactly key and value structs are rejected.
+
+    A bad dtype is caught while Polars resolves the output type of the wrapped
+    function, which replaces the message, so only the error type is asserted.
+    """
+    frame = pl.DataFrame([ser])
+    with pytest.raises(InvalidOperationError):
+        frame.select(emap(pl.col("map")).from_entries())  # pyright: ignore[reportUnknownMemberType]
+
+
+def test_eval_rejects_renamed_fields(map_frame: pl.DataFrame) -> None:
+    """Verify an expression that renames the entry fields is rejected."""
+    with pytest.raises(InvalidOperationError):
+        map_frame.select(  # pyright: ignore[reportUnknownMemberType]
+            emap(pl.col("map")).eval(pl.element().struct.rename_fields(["k", "v"]))
+        )
+
+
+def test_canonicalizing_ops_keep_null_and_empty_rows(map_frame: pl.DataFrame) -> None:
+    """Verify null rows stay null and empty rows stay empty through every op."""
+    [entries, evaled, keyed, valued, merged] = map_frame.select(  # pyright: ignore[reportUnknownMemberType]
+        emap(emap(pl.col("map")).entries()).from_entries().alias("entries"),
+        emap(pl.col("map")).eval(pl.element()).alias("evaled"),
+        emap(pl.col("map")).eval_keys(pl.element()).alias("keyed"),
+        emap(pl.col("map")).eval_values(pl.element()).alias("valued"),
+        emap(pl.col("map")).merge(pl.col("map")).alias("merged"),
+    )
+    for ser in (entries, evaled, keyed, valued, merged):
+        lengths = ser.ext.storage().list.len().to_list()
+        assert lengths == [3, 1, None, 0]
 
 
 def test_merge_no_overlap() -> None:
@@ -218,21 +294,24 @@ def test_merge_no_overlap() -> None:
 
 
 def test_merge_overlap_right_wins() -> None:
-    """Verify merge uses right-side value on key conflict."""
+    """Verify merge takes the right-side value at the left-side position."""
     left = pl.Series(
         "l",
         [[{"key": "a", "value": 1}, {"key": "b", "value": 2}]],
         dtype=Map(pl.String(), pl.Int64()),
     )
     right = pl.Series(
-        "r", [[{"key": "a", "value": 99}]], dtype=Map(pl.String(), pl.Int64())
+        "r",
+        [[{"key": "c", "value": 3}, {"key": "a", "value": 99}]],
+        dtype=Map(pl.String(), pl.Int64()),
     )
     frame = pl.DataFrame([left, right])
     [result] = frame.select(emap(pl.col("l")).merge(pl.col("r")))  # pyright: ignore[reportUnknownMemberType]
-    vals = result.to_list()[0]
-    val_dict = {e["key"]: e["value"] for e in vals}
-    assert val_dict["a"] == 99  # noqa: PLR2004
-    assert val_dict["b"] == 2  # noqa: PLR2004
+    assert result.ext.storage().to_list()[0] == [
+        {"key": "a", "value": 99},
+        {"key": "b", "value": 2},
+        {"key": "c", "value": 3},
+    ]
 
 
 def test_intersection() -> None:
