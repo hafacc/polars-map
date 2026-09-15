@@ -27,10 +27,22 @@ def test_isinstance_check() -> None:
     assert not isinstance(pl.List(pl.Int64), Map)
 
 
+def test_parse_dtypes() -> None:
+    """Verify construction from dtype instances, dtype classes, and Python types."""
+    instances = Map(pl.String(), pl.Int64())
+    assert Map(pl.String, pl.Int64) == instances
+    assert Map(str, int) == instances
+
+
 def test_string_repr() -> None:
     """Verify internal string representation."""
     m = Map(pl.String(), pl.Int64())
-    assert m._string_repr() == "map[str,i64]"  # pyright: ignore[reportPrivateUsage]
+    assert m._string_repr() == "map[str, i64]"  # pyright: ignore[reportPrivateUsage]
+
+
+def test_repr() -> None:
+    """Verify the canonical representation matches the native map type."""
+    assert repr(Map(pl.String(), pl.Int64())) == "Map(String, Int64)"
 
 
 def test_extension_name() -> None:
@@ -44,7 +56,7 @@ def test_create_series() -> None:
         "map", [[{"key": "a", "value": 1}]], dtype=Map(pl.String(), pl.Int64())
     )
     assert isinstance(ser.dtype, Map)
-    assert "ext[map[str,i64]]" in str(ser)
+    assert "ext[map[str, i64]]" in str(ser)
 
 
 def test_series_rows(map_series: pl.Series) -> None:
