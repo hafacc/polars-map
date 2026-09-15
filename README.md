@@ -5,8 +5,9 @@
 
 Polars plugin providing a `Map` extension type stored as `List(Struct({key, value}))`.
 
-> Polars 2.0 ships a native `pl.Map` and reserves the `.map` namespace, so this package is
-> pinned to `polars<2`. Its semantics match the native type; see
+> **Deprecated** — Polars 2.0 ships a native `pl.Map` and reserves the `.map` namespace,
+> so this package is pinned to `polars<2` and emits a `DeprecationWarning` on import.
+> Its semantics match the native type; see
 > [Migrating to native `pl.Map`](#migrating-to-native-plmap).
 
 The type-preserving methods (`filter`, `filter_keys`, `filter_values`, `merge`,

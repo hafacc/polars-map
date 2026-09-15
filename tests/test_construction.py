@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
-import polars as pl
+import importlib
 
+import polars as pl
+import pytest
+
+import polars_map
 from polars_map import Map
 
 from .conftest import smap
@@ -81,3 +85,9 @@ def test_iter(map_series: pl.Series) -> None:
     """Verify iterating over map series yields Python dicts."""
     result = [*smap(map_series)]
     assert result == [{"a": 1, "b": 2, "c": 3}, {"x": 10}, None, {}]
+
+
+def test_import_deprecation_warning() -> None:
+    """Verify importing the package emits a deprecation warning."""
+    with pytest.warns(DeprecationWarning, match="polars-map is deprecated"):
+        importlib.reload(polars_map)
