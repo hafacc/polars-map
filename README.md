@@ -1,6 +1,6 @@
 # polars-map
 
-[![build](https://github.com/hafaio/polars-map/actions/workflows/build.yml/badge.svg)](https://github.com/hafaio/polars-map/actions/workflows/build.yml)
+[![build](https://github.com/hafacc/polars-map/actions/workflows/build.yml/badge.svg)](https://github.com/hafacc/polars-map/actions/workflows/build.yml)
 [![pypi](https://img.shields.io/pypi/v/polars-map)](https://pypi.org/project/polars-map/)
 
 Polars plugin providing a `Map` extension type stored as `List(Struct({key, value}))`.
