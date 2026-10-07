@@ -16,10 +16,10 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/hafaio/polars-map"
-Repository = "https://github.com/hafaio/polars-map"
-Documentation = "https://github.com/hafaio/polars-map#readme"
-Issues = "https://github.com/hafaio/polars-map/issues"
+Homepage = "https://github.com/hafacc/polars-map"
+Repository = "https://github.com/hafacc/polars-map"
+Documentation = "https://github.com/hafacc/polars-map#readme"
+Issues = "https://github.com/hafacc/polars-map/issues"
 
 [dependency-groups]
 dev = [
